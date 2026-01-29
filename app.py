@@ -1,10 +1,30 @@
 import streamlit as st
-from playwright.async_api import async_playwright
-import asyncio
+import os
+import subprocess
 import sys
+import asyncio
 import re
 import pandas as pd
 from datetime import datetime
+
+# --- [서버 필수: 브라우저 자동 설치 로직] ---
+# 이 부분이 없으면 웹 서버에서 Playwright가 작동하지 않아 "Oh no"가 뜹니다.
+@st.cache_resource
+def install_browser():
+    try:
+        # 이미 설치되었는지 확인 파일 체크
+        if not os.path.exists(".browser_installed"):
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+            subprocess.run([sys.executable, "-m", "playwright", "install-deps"], check=True)
+            with open(".browser_installed", "w") as f:
+                f.write("done")
+    except Exception as e:
+        st.error(f"브라우저 엔진 설치 중 오류: {e}")
+
+install_browser()
+# ------------------------------------------
+
+from playwright.async_api import async_playwright
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -25,7 +45,8 @@ st.markdown("""
 async def analyze_post(context, url):
     page = await context.new_page()
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=8000)
+        # 서버 환경에서는 타임아웃을 10초로 조금 늘림
+        await page.goto(url, wait_until="domcontentloaded", timeout=10000)
         content = await page.inner_text('body')
         await page.close()
         
@@ -39,16 +60,19 @@ async def analyze_post(context, url):
         
         return is_soldout, tags[:2]
     except:
+        try: await page.close()
+        except: pass
         return False, ["⚪ 분석대기"]
 
 # --- [메인 엔진: 확정2번코드 기반] ---
 async def run_crawling():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        # 서버 환경용 옵션 추가 (--no-sandbox)
+        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         context = await browser.new_context()
         page = await context.new_page()
         try:
-            await page.goto("https://www.fmkorea.com/?mid=hotdeal", wait_until="networkidle")
+            await page.goto("https://www.fmkorea.com/?mid=hotdeal", wait_until="networkidle", timeout=20000)
             raw_text = await page.inner_text('body')
             links = await page.eval_on_selector_all('a', 'elements => elements.map(e => ({ "text": e.innerText.trim(), "href": e.getAttribute("href") }))')
             
@@ -92,7 +116,8 @@ async def run_crawling():
             
             await browser.close()
             return deals
-        except:
+        except Exception as e:
+            st.error(f"데이터 수집 중 오류: {e}")
             await browser.close()
             return None
 
@@ -100,7 +125,7 @@ async def run_crawling():
 st.title("🔥 Dealstock v4.5: Market Terminal")
 
 if st.button('🚀 실시간 데이터 동기화'):
-    with st.spinner('시장의 민심을 분석하는 중...'):
+    with st.spinner('시장의 민심을 분석하는 중... (처음엔 브라우저 설치로 시간이 걸릴 수 있어)'):
         data = asyncio.run(run_crawling())
         if data:
             st.session_state['v45_report'] = data
